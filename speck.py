@@ -31,6 +31,7 @@ def enc_one_round(p, k):
     c0 = c0 ^ k;
     c1 = rol(c1, BETA());
     c1 = c1 ^ c0;
+    #returns two halves after one round of encryption
     return(c0,c1);
 
 def dec_one_round(c,k):
@@ -54,6 +55,7 @@ def encrypt(p, ks):
     x, y = p[0], p[1];
     for k in ks:
         x,y = enc_one_round((x,y), k);
+    #returns two halves of text after full encryption
     return(x, y);
 
 def decrypt(c, ks):

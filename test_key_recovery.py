@@ -62,10 +62,16 @@ def make_structure(pt0, pt1, diff=(0x211,0xa04),neutral_bits = [20,21,22,14,15])
   p0 = np.copy(pt0); p1 = np.copy(pt1);
   p0 = p0.reshape(-1,1); p1 = p1.reshape(-1,1);
   for i in neutral_bits:
-    d = 1 << i; d0 = d >> 16; d1 = d & 0xffff
+    d = 1 << i;
+    d0 = d >> 16;
+    d1 = d & 0xffff
     p0 = np.concatenate([p0,p0^d0],axis=1);
     p1 = np.concatenate([p1,p1^d1],axis=1);
-  p0b = p0 ^ diff[0]; p1b = p1 ^ diff[1];
+  p0b = p0 ^ diff[0];
+  p1b = p1 ^ diff[1];
+
+  #p0, p1 = normal halves of plaintext, unmodified from pt0 and pt1
+  #p0b, p1b = plaintexts that are the input differnce away from pt0 and pt1
   return(p0,p1,p0b,p1b);
 
 #generate a Speck key, return expanded key
@@ -75,26 +81,47 @@ def gen_key(nr):
   return(ks);
 
 def gen_plain(n):
+  #generate two random string of bytes of size 2n, return each
   pt0 = np.frombuffer(urandom(2*n),dtype=np.uint16);
   pt1 = np.frombuffer(urandom(2*n),dtype=np.uint16);
   return(pt0, pt1);
 
 def gen_challenge(n, nr, diff=(0x211, 0xa04), neutral_bits = [20,21,22,14,15,23], keyschedule='real'):
+  #generate two random plaintext pairs, each of size 2n
+  #plaintext0, plaintext1
   pt0, pt1 = gen_plain(n);
+  #returns series of modified plaintexts and the plaintexts that are the input distance away from the original
+  #pt0a = left half of each neutral bit variant
+  #pt1a = right half of each neutral bit variant
+  #pt0b = left half of each neutral bit variant after input difference
+  #pt1b = right half of each neutral bit variant after input difference
   pt0a, pt1a, pt0b, pt1b = make_structure(pt0, pt1, diff=diff, neutral_bits=neutral_bits);
-  pt0a, pt1a = sp.dec_one_round((pt0a, pt1a),0);
-  pt0b, pt1b = sp.dec_one_round((pt0b, pt1b),0);
+
+  #run one round of speck decryption on each half
+  pt0a, pt1a = sp.dec_one_round((pt0a, pt1a),0); #normal plaintext
+  pt0b, pt1b = sp.dec_one_round((pt0b, pt1b),0); #input difference text
+  #generate key for nr rounds (11 or 12)
   key = gen_key(nr);
+  #by default this is true, which means key is randomly generated
   if (keyschedule is 'free'): key = np.frombuffer(urandom(2*nr),dtype=np.uint16);
-  ct0a, ct1a = sp.encrypt((pt0a, pt1a), key);
-  ct0b, ct1b = sp.encrypt((pt0b, pt1b), key);
+  #run full speck encryption of the two halves of the two plaintexts using the generated key
+  ct0a, ct1a = sp.encrypt((pt0a, pt1a), key); #normal plaintext
+  ct0b, ct1b = sp.encrypt((pt0b, pt1b), key);  #input difference text
+  #return both halves of both ciphertexts along with the key used to encrypt them
   return([ct0a, ct1a, ct0b, ct1b], key);
 
+#verifies the two inputted ciphertexts meet the target_diff differnce after nr rounds of decryption
 def find_good(cts, key, nr=3, target_diff = (0x0040,0x0)):
+  #decrypt each of the two ciphertexts using three rounds
+  #pt0a & pt0b are the left halves and pt1a & pt1b are the right halves
   pt0a, pt1a = sp.decrypt((cts[0], cts[1]), key[nr:]);
   pt0b, pt1b = sp.decrypt((cts[2], cts[3]), key[nr:]);
-  diff0 = pt0a ^ pt0b; diff1 = pt1a ^ pt1b;
-  d0 = (diff0 == target_diff[0]); d1 = (diff1 == target_diff[1]);
+  #check to see if the differnce between the left halves is 0x0040 and the right halves is 0x0000
+  diff0 = pt0a ^ pt0b;
+  diff1 = pt1a ^ pt1b;
+  d0 = (diff0 == target_diff[0]);
+  d1 = (diff1 == target_diff[1]);
+  #d = 1 iff both halves meet this differnce (why was this logic written this way lol, hard to read)
   d = d0 * d1;
   v = np.sum(d,axis=1);
   return(v);
@@ -105,8 +132,10 @@ def verifier_search(cts, best_guess, use_n = 64, net = net6):
   ck1 = best_guess[0] ^ low_weight;
   ck2 = best_guess[1] ^ low_weight;
   n = len(ck1);
-  ck1 = np.repeat(ck1, n); keys1 = np.copy(ck1);
-  ck2 = np.tile(ck2, n); keys2 = np.copy(ck2);
+  ck1 = np.repeat(ck1, n);
+  keys1 = np.copy(ck1);
+  ck2 = np.tile(ck2, n);
+  keys2 = np.copy(ck2);
   ck1 = np.repeat(ck1, use_n);
   ck2 = np.repeat(ck2, use_n);
   ct0a = np.tile(cts[0][0:use_n], n*n);
@@ -169,9 +198,17 @@ def bayesian_rank_kr(cand, emp_mean, m=m7, s=s7):
   scores = np.linalg.norm(v, axis=1);
   return(scores);
 
+#bayesian optimization key search policy
+#reduces the number of trial decryptions used by basic attack
+#takes in both halves of a ciphertext and the input difference of said ciphertext
+
+#net7 is the neural distinguisher
 def bayesian_key_recovery(cts, net=net7, m = m7, s = s7, num_cand = 32, num_iter=5, seed = None):
   n = len(cts[0]);
-  keys = np.random.choice(2**(WORD_SIZE-2),num_cand,replace=False); scores = 0; best = 0;
+  #randomly generate initial key?
+  keys = np.random.choice(2**(WORD_SIZE-2),num_cand,replace=False);
+  scores = 0;
+  best = 0;
   if (not seed is None):
     keys = np.copy(seed);
   ct0a, ct1a, ct0b, ct1b = np.tile(cts[0],num_cand), np.tile(cts[1], num_cand), np.tile(cts[2], num_cand), np.tile(cts[3], num_cand);
@@ -181,43 +218,67 @@ def bayesian_key_recovery(cts, net=net7, m = m7, s = s7, num_cand = 32, num_iter
   all_v = np.zeros(num_cand * num_iter);
   for i in range(num_iter):
     k = np.repeat(keys, n);
-    c0a, c1a = sp.dec_one_round((ct0a, ct1a),k); c0b, c1b = sp.dec_one_round((ct0b, ct1b),k);
+    c0a, c1a = sp.dec_one_round((ct0a, ct1a),k);
+    c0b, c1b = sp.dec_one_round((ct0b, ct1b),k);
     X = sp.convert_to_binary([c0a, c1a, c0b, c1b]);
     Z = net.predict(X,batch_size=10000);
     Z = Z.reshape(num_cand, -1);
     means = np.mean(Z, axis=1);
-    Z = Z/(1-Z); Z = np.log2(Z); v =np.sum(Z, axis=1); all_v[i * num_cand:(i+1)*num_cand] = v;
+    Z = Z/(1-Z); Z = np.log2(Z); v =np.sum(Z, axis=1);
+    all_v[i * num_cand:(i+1)*num_cand] = v;
     all_keys[i * num_cand:(i+1)*num_cand] = np.copy(keys);
     scores = bayesian_rank_kr(keys, means, m=m, s=s);
     tmp = np.argpartition(scores+used, num_cand)
     keys = tmp[0:num_cand];
-    r = np.random.randint(0,4,num_cand,dtype=np.uint16); r = r << 14; keys = keys ^ r;
+    r = np.random.randint(0,4,num_cand,dtype=np.uint16);
+    r = r << 14; keys = keys ^ r;
   return(all_keys, scores, all_v);
 
+#key search
 def test_bayes(cts,it=1, cutoff1=10, cutoff2=10, net=net7, net_help=net6, m_main=m7, m_help=m6, s_main=s7, s_help=s6, verify_breadth=None):
+  #n = number of ciphertext variants to try
   n = len(cts[0]);
+  #true for initial experiment. sets to length of half of first ciphertext
   if (verify_breadth is None): verify_breadth=len(cts[0][0]);
+  #initializing values
   alpha = sqrt(n);
-  best_val = -100.0; best_key = (0,0); best_pod = 0; bp = 0; bv = -100.0;
+  best_val = -100.0;
+  best_key = (0,0);
+  best_pod = 0;
+  bp = 0;
+  bv = -100.0;
   keys = np.random.choice(2**WORD_SIZE, 32, replace=False);
-  eps = 0.001; local_best = np.full(n,-10); num_visits = np.full(n,eps);
+  eps = 0.001;
+  local_best = np.full(n,-10);
+  num_visits = np.full(n,eps);
+  #2^16 guesses in total
   guess_count = np.zeros(2**16,dtype=np.uint16);
+
+  #now the guesses are made. for initial experiment, 500 guesses.
   for j in range(it):
-      priority = local_best + alpha * np.sqrt(log2(j+1) / num_visits); i = np.argmax(priority);
+      #calculting the Upper Confidence Bounds from the paper
+      priority = local_best + alpha * np.sqrt(log2(j+1) / num_visits);
+      i = np.argmax(priority);
+      #counting how many times you've guessed so far
       num_visits[i] = num_visits[i] + 1;
+      #improve guess if looks promising thus far
       if (best_val > cutoff2):
         improvement = (verify_breadth > 0);
         while improvement:
+          #having a good ciphertext candidate, exhaustively explore all keys with hamming distance less than two of this key
+          #if a better value is found, use this instead
           k1, k2, val = verifier_search([cts[0][best_pod], cts[1][best_pod], cts[2][best_pod], cts[3][best_pod]], best_key,net=net_help, use_n = verify_breadth);
           improvement = (val > best_val);
           if (improvement):
-            best_key = (k1, k2); best_val = val;
+            best_key = (k1, k2);
+            best_val = val;
         return(best_key, j);
       keys, scores, v = bayesian_key_recovery([cts[0][i], cts[1][i], cts[2][i], cts[3][i]], num_cand=32, num_iter=5,net=net, m=m_main, s=s_main);
       vtmp = np.max(v);
       if (vtmp > local_best[i]): local_best[i] = vtmp;
       if (vtmp > bv):
-        bv = vtmp; bp = i;
+        bv = vtmp;
+        bp = i;
       if (vtmp > cutoff1):
         l2 = [i for i in range(len(keys)) if v[i] > cutoff1];
         for i2 in l2:
@@ -226,41 +287,64 @@ def test_bayes(cts,it=1, cutoff1=10, cutoff2=10, net=net7, net_help=net6, m_main
           keys2,scores2,v2 = bayesian_key_recovery([c0a, c1a, c0b, c1b],num_cand=32, num_iter=5, m=m6,s=s6,net=net_help);
           vtmp2 = np.max(v2);
           if (vtmp2 > best_val):
-            best_val = vtmp2; best_key = (keys[i2], keys2[np.argmax(v2)]); best_pod=i;
+            best_val = vtmp2;
+            best_key = (keys[i2], keys2[np.argmax(v2)]);
+            best_pod=i;
   improvement = (verify_breadth > 0);
   while improvement:
     k1, k2, val = verifier_search([cts[0][best_pod], cts[1][best_pod], cts[2][best_pod], cts[3][best_pod]], best_key, net=net_help, use_n = verify_breadth);
     improvement = (val > best_val);
     if (improvement):
-      best_key = (k1, k2); best_val = val;
+      best_key = (k1, k2);
+      best_val = val;
   return(best_key, it);
 
+#The program is initialized here, doing an 11 round attack 100 times
 def test(n, nr=11, num_structures=100, it=500, cutoff1=10.0, cutoff2=10.0, neutral_bits=[20,21,22,14,15,23], keyschedule='real',net=net7, net_help=net6, m_main=m7, s_main=s7,  m_help=m6, s_help=s6, verify_breadth=None):
   print("Checking Speck32/64 implementation.");
   if (not sp.check_testvector()):
     print("Error. Aborting.");
     return(0);
-  arr1 = np.zeros(n, dtype=np.uint16); arr2 = np.zeros(n, dtype=np.uint16);
+  #arrays of size n = number of attacks
+  arr1 = np.zeros(n, dtype=np.uint16);
+  arr2 = np.zeros(n, dtype=np.uint16);
+  #grab start time
   t0 = time();
-  data = 0; av=0.0; good = np.zeros(n, dtype=np.uint8);
+  #init all vars to zero; good is also of size n = number of attacks
+  data = 0;
+  av=0.0;
+  good = np.zeros(n, dtype=np.uint8);
   zkey = np.zeros(nr,dtype=np.uint16);
+
+  #running each experiment
   for i in range(n):
     print("Test:",i);
+    
+    #returns two ciphertexts and a key used to make them
     ct, key = gen_challenge(num_structures,nr, neutral_bits=neutral_bits, keyschedule=keyschedule);
-    g = find_good(ct, key); g = np.max(g); good[i] = g;
+    #verify that the plaintexts from gen_challenge meet the input diffence of 0x0040, 0x0000
+    g = find_good(ct, key);
+    g = np.max(g);
+    #mark this experiment as good if the input difference is met
+    good[i] = g;
+    #
     guess, num_used = test_bayes(ct,it=it, cutoff1=cutoff1, cutoff2=cutoff2, net=net, net_help=net_help, m_main=m_main, s_main=s_main, m_help=m_help, s_help=s_help, verify_breadth=verify_breadth);
-    num_used = min(num_structures, num_used); data = data + 2 * (2 ** len(neutral_bits)) * num_used;
-    arr1[i] = guess[0] ^ key[nr-1]; arr2[i] = guess[1] ^ key[nr-2];
+    num_used = min(num_structures, num_used);
+    data = data + 2 * (2 ** len(neutral_bits)) * num_used;
+    arr1[i] = guess[0] ^ key[nr-1];
+    arr2[i] = guess[1] ^ key[nr-2];
     print("Difference between real key and key guess: ", hex(arr1[i]), hex(arr2[i]));
   t1 = time();
   print("Done.");
-  d1 = [hex(x) for x in arr1]; d2 = [hex(x) for x in arr2];
+  d1 = [hex(x) for x in arr1];
+  d2 = [hex(x) for x in arr2];
   print("Differences between guessed and last key:", d1);
   print("Differences between guessed and second-to-last key:", d2);
   print("Wall time per attack (average in seconds):", (t1 - t0)/n);
   print("Data blocks used (average, log2): ", log2(data) - log2(n));
   return(arr1, arr2, good);
 
+#initial experiment, using many default values. 11-round attack 100 times.
 arr1, arr2, good = test(100);
 np.save(open('run_sols1.npy','wb'),arr1);
 np.save(open('run_sols2.npy','wb'),arr2);
